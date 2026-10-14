@@ -60,6 +60,23 @@ class TestConcretumNoiseVwapStrategy(unittest.TestCase):
         self.assertIn("<b>", payload["text"])
         self.assertIn("&gt;UB &amp; &gt;VWAP", payload["text"])
 
+    def test_app_stays_locked_without_correct_password(self):
+        from streamlit.testing.v1 import AppTest
+
+        app_path = str(pathlib.Path(__file__).resolve().parent.parent / "app.py")
+        with mock.patch.object(webapp, "_app_password", return_value=""):
+            at = AppTest.from_file(app_path).run()
+            self.assertIn("locked", at.error[0].value)
+            self.assertEqual(len(at.subheader), 0)
+
+        with mock.patch.object(webapp, "_app_password", return_value="correct-horse"):
+            at = AppTest.from_file(app_path).run()
+            at.text_input[0].input("wrong-guess")
+            at.button[0].click()
+            at.run()
+            self.assertEqual(at.error[0].value, "Incorrect password.")
+            self.assertEqual(len(at.subheader), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

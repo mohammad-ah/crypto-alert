@@ -19,8 +19,10 @@ HOW TO RUN LOCALLY OR HOST FOR FREE ON STREAMLIT COMMUNITY CLOUD:
 from __future__ import annotations
 
 import datetime as dt
+import hmac
 import html
 import math
+import os
 import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -522,8 +524,36 @@ def generate_concretum_demo_basket() -> Dict[str, pd.DataFrame]:
     return basket
 
 
+def _app_password() -> str:
+    try:
+        from_secrets = st.secrets.get("APP_PASSWORD", "")
+    except Exception:  # no secrets.toml configured
+        from_secrets = ""
+    return str(from_secrets or os.getenv("APP_PASSWORD", ""))
+
+
+def _password_gate() -> bool:
+    """Blocks the app until APP_PASSWORD is entered; stays locked if no password is configured."""
+    if st.session_state.get("authenticated"):
+        return True
+    expected = _app_password()
+    if not expected:
+        st.error("This app is locked: set APP_PASSWORD in Streamlit secrets or the environment.")
+        return False
+    with st.form("login"):
+        entered = st.text_input("Password", type="password")
+        if st.form_submit_button("Unlock"):
+            if hmac.compare_digest(entered.encode(), expected.encode()):
+                st.session_state["authenticated"] = True
+                st.rerun()
+            st.error("Incorrect password.")
+    return False
+
+
 def render_streamlit_app() -> None:
     st.set_page_config(page_title="Concretum Noise Area + VWAP Signal Hub", layout="wide")
+    if not _password_gate():
+        return
     st.title("🎯 Concretum Intraday Noise Area + VWAP Signal App")
     st.caption(
         "Exact 1:1 Python & Multi-Ticker Scanner port of `concretum_noise_area_vwap_strategy.pine` "
