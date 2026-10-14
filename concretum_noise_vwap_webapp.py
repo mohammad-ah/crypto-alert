@@ -524,12 +524,16 @@ def generate_concretum_demo_basket() -> Dict[str, pd.DataFrame]:
     return basket
 
 
-def _app_password() -> str:
+def _config_secret(name: str) -> str:
     try:
-        from_secrets = st.secrets.get("APP_PASSWORD", "")
+        from_secrets = st.secrets.get(name, "")
     except Exception:  # no secrets.toml configured
         from_secrets = ""
-    return str(from_secrets or os.getenv("APP_PASSWORD", ""))
+    return str(from_secrets or os.getenv(name, "")).strip()
+
+
+def _app_password() -> str:
+    return _config_secret("APP_PASSWORD")
 
 
 def _password_gate() -> bool:
@@ -579,9 +583,21 @@ def render_streamlit_app() -> None:
         filter_mon = st.checkbox("Skip Monday Trades Before 10:30 ET", value=False)
 
         st.header("3. Push Alert Webhooks")
-        tg_token = st.text_input("Telegram Bot Token", type="password")
-        tg_chat = st.text_input("Telegram Chat ID")
-        discord_url = st.text_input("Discord Webhook URL", type="password")
+        # Saved secrets are used when a box is left empty; they are never sent to the browser as default values.
+        alert_fields = []
+        for label, secret_name, kind in [
+            ("Telegram Bot Token", "TELEGRAM_BOT_TOKEN", "password"),
+            ("Telegram Chat ID", "TELEGRAM_CHAT_ID", "default"),
+            ("Discord Webhook URL", "DISCORD_WEBHOOK_URL", "password"),
+        ]:
+            saved = _config_secret(secret_name)
+            typed = st.text_input(
+                label,
+                type=kind,
+                placeholder="Using saved secret (type to override)" if saved else "",
+            )
+            alert_fields.append(typed.strip() or saved)
+        tg_token, tg_chat, discord_url = alert_fields
         feed_mode = st.radio("Data Feed", ["Live Yahoo Finance (5m RTH)", "Built-in Verification Dataset"])
 
     basket = generate_concretum_demo_basket()

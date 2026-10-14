@@ -77,6 +77,34 @@ class TestConcretumNoiseVwapStrategy(unittest.TestCase):
             self.assertEqual(at.error[0].value, "Incorrect password.")
             self.assertEqual(len(at.subheader), 0)
 
+    def test_push_button_uses_saved_secrets_without_exposing_them(self):
+        from streamlit.testing.v1 import AppTest
+
+        saved = {
+            "TELEGRAM_BOT_TOKEN": "111:saved-token",
+            "TELEGRAM_CHAT_ID": "4242",
+            "DISCORD_WEBHOOK_URL": "https://discord.example/webhook",
+        }
+        app_path = str(pathlib.Path(__file__).resolve().parent.parent / "app.py")
+        with mock.patch.object(webapp, "_config_secret", side_effect=lambda name: saved.get(name, "")), \
+                mock.patch.object(webapp, "download_intraday_bars", return_value=pd.DataFrame()), \
+                mock.patch.object(webapp.requests, "post") as post:
+            post.return_value.ok = True
+            at = AppTest.from_file(app_path)
+            at.session_state["authenticated"] = True
+            at.run()
+            alert_boxes = [t for t in at.text_input if t.label in ("Telegram Bot Token", "Telegram Chat ID", "Discord Webhook URL")]
+            self.assertEqual([t.value for t in alert_boxes], ["", "", ""])
+            at.button(key="btn_SPY").click()
+            at.run()
+
+        urls = [c.args[0] for c in post.call_args_list]
+        self.assertIn("https://api.telegram.org/bot111:saved-token/sendMessage", urls)
+        self.assertIn("https://discord.example/webhook", urls)
+        tg_call = next(c for c in post.call_args_list if "telegram" in c.args[0])
+        self.assertEqual(tg_call.kwargs["json"]["chat_id"], "4242")
+        self.assertEqual(at.success[0].value, "Telegram OK | Discord OK")
+
 
 if __name__ == "__main__":
     unittest.main()
