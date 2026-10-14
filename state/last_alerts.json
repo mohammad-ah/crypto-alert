@@ -2,7 +2,7 @@
   "SPY": "FLAT_WAIT::INSIDE NOISE AREA (Equilibrium)",
   "QQQ": "FLAT_WAIT::INSIDE NOISE AREA (Equilibrium)",
   "BITO": "FLAT_WAIT::INSIDE NOISE AREA (Equilibrium)",
-  "NVDA": "ENTER_LONG (On 30m Close)::BULLISH IMBALANCE (>UB & >VWAP)",
+  "NVDA": "FLAT_WAIT::INSIDE NOISE AREA (Equilibrium)",
   "TSLA": "FLAT_WAIT::INSIDE NOISE AREA (Equilibrium)",
   "BTC-USD": "FLAT_WAIT::INSIDE NOISE AREA (Equilibrium)",
   "ETH-USD": "FLAT_WAIT::INSIDE NOISE AREA (Equilibrium)"
