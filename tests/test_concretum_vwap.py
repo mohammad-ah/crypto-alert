@@ -169,6 +169,30 @@ class TestConcretumNoiseVwapStrategy(unittest.TestCase):
             self.assertTrue(saved["sb_use_completed"])
             self.assertNotIn("tg_token_box", saved)
 
+    def test_sidebar_falls_back_to_browser_cookie_when_config_file_is_gone(self):
+        from streamlit.testing.v1 import AppTest
+
+        app_path = str(pathlib.Path(__file__).resolve().parent.parent / "app.py")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "ui_settings.json"
+            cookie = {
+                "sb_watchlist": "ETH-USD",
+                "sb_use_completed": True,
+                "sb_equity": 250000.0,
+                "sb_user_bias": "Long Only",
+            }
+            with mock.patch.object(webapp, "_ui_settings_path", return_value=path), \
+                    mock.patch.object(webapp, "_load_browser_settings", return_value=cookie), \
+                    mock.patch.object(webapp, "download_intraday_bars", return_value=pd.DataFrame()):
+                at = AppTest.from_file(app_path)
+                at.session_state["authenticated"] = True
+                at.run()
+                self.assertEqual(at.text_input(key="sb_watchlist").value, "ETH-USD")
+                self.assertTrue(at.checkbox(key="sb_use_completed").value)
+                self.assertEqual(at.number_input(key="sb_equity").value, 250000.0)
+            self.assertTrue(path.exists(), "cookie restore should rewrite the JSON file")
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["sb_watchlist"], "ETH-USD")
+
     def test_completed_decision_bar_keeps_enter_and_exit_after_later_bars(self):
         eth = self.basket["ETH-USD"]
         after_enter = eth[eth.index <= pd.Timestamp("2026-10-13 03:35:00")]
