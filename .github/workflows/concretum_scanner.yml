@@ -1,0 +1,45 @@
+name: Concretum Noise + VWAP 30m Signal Scanner
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Runs every 30 minutes during US Regular Trading Hours (14:00 - 21:00 UTC Mon-Fri)
+    - cron: '0,30 14-21 * * 1-5'
+
+jobs:
+  scan_concretum_signals:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run 30-Minute Concretum Noise + VWAP Scanner
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          WATCHLIST: ${{ vars.WATCHLIST || 'SPY,QQQ,BITO,NVDA,TSLA' }}
+          ACCOUNT_EQUITY: ${{ vars.ACCOUNT_EQUITY || '100000' }}
+          LOOKBACK_DAYS: ${{ vars.LOOKBACK_DAYS || '14' }}
+          VOL_MULT: ${{ vars.VOL_MULT || '1.0' }}
+          USER_BIAS: ${{ vars.USER_BIAS || 'Both (Long & Short)' }}
+        run: python scanner_cron.py --send-alerts
+
+      - name: Save deduplication state
+        run: |
+          git config user.name "concretum-signal-bot"
+          git config user.email "bot@users.noreply.github.com"
+          git add state/last_alerts.json || true
+          git diff --staged --quiet || git commit -m "chore: update 30m signal state [skip ci]"
+          git push || true
