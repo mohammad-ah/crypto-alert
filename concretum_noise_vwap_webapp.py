@@ -24,6 +24,7 @@ import html
 import json
 import math
 import os
+import pathlib
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -672,9 +673,15 @@ def _sidebar_defaults() -> Dict[str, Any]:
     }
 
 
-def _parse_sidebar_value(key: str, raw: str, default: Any) -> Any:
+def _ui_settings_path() -> pathlib.Path:
+    return pathlib.Path(os.getenv("UI_SETTINGS_FILE", "state/ui_settings.json"))
+
+
+def _coerce_sidebar_value(raw: Any, default: Any) -> Any:
     try:
         if isinstance(default, bool):
+            if isinstance(raw, bool):
+                return raw
             return str(raw).strip().lower() in {"1", "true", "yes", "on"}
         if isinstance(default, int) and not isinstance(default, bool):
             return int(float(raw))
@@ -685,23 +692,32 @@ def _parse_sidebar_value(key: str, raw: str, default: Any) -> Any:
         return default
 
 
-def _qp_get(key: str) -> Optional[str]:
-    if key not in st.query_params:
-        return None
-    val = st.query_params[key]
-    if isinstance(val, list):
-        return str(val[0]) if val else None
-    return str(val)
+def _load_ui_settings() -> Dict[str, Any]:
+    path = _ui_settings_path()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
 
 
-def _init_sidebar_from_url() -> None:
-    """Restore sidebar widgets from the URL on a fresh browser load (session_state is empty after refresh)."""
+def _sidebar_payload() -> Dict[str, Any]:
+    payload = {}
+    for key, default in _sidebar_defaults().items():
+        payload[key] = _coerce_sidebar_value(st.session_state.get(key, default), default)
+    return payload
+
+
+def _init_sidebar_from_config() -> None:
+    """Restore sidebar widgets from state/ui_settings.json. Ignores the URL."""
     if st.session_state.get("_sidebar_inited"):
         return
     defaults = _sidebar_defaults()
+    saved = _load_ui_settings()
     for key, default in defaults.items():
-        raw = _qp_get(key)
-        st.session_state[key] = _parse_sidebar_value(key, raw, default) if raw is not None else default
+        st.session_state[key] = _coerce_sidebar_value(saved[key], default) if key in saved else default
     if st.session_state["sb_stop_mode"] not in _STOP_MODES:
         st.session_state["sb_stop_mode"] = defaults["sb_stop_mode"]
     if st.session_state["sb_trade_freq"] not in _TRADE_FREQS:
@@ -721,53 +737,21 @@ def _init_sidebar_from_url() -> None:
     st.session_state["_sidebar_inited"] = True
 
 
-def _encode_sidebar_params() -> Dict[str, str]:
-    payload = {}
-    for key, default in _sidebar_defaults().items():
-        val = st.session_state.get(key, default)
-        if isinstance(val, bool):
-            payload[key] = "1" if val else "0"
-        else:
-            payload[key] = str(val)
-    return payload
+def _sync_sidebar_to_config() -> None:
+    payload = _sidebar_payload()
+    saved = _load_ui_settings()
+    if {k: saved.get(k) for k in payload} == payload:
+        return
+    path = _ui_settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
-def _sync_sidebar_to_url() -> None:
-    payload = _encode_sidebar_params()
-    current = {key: _qp_get(key) for key in payload}
-    if current != payload:
-        st.query_params.from_dict(payload)
-
-
-def _persist_sidebar_in_browser() -> None:
-    """Keep a localStorage copy so settings also come back if the app is opened without query params."""
-    payload = json.dumps(_encode_sidebar_params())
-    st.components.v1.html(
-        f"""
-        <script>
-        const KEY = "concretum_sidebar_v1";
-        const fromPython = {payload};
-        const params = new URLSearchParams(window.parent.location.search);
-        const hasSidebar = Array.from(params.keys()).some((k) => k.startsWith("sb_"));
-        if (!hasSidebar) {{
-          const saved = window.parent.localStorage.getItem(KEY);
-          if (saved) {{
-            try {{
-              const obj = JSON.parse(saved);
-              const next = new URLSearchParams();
-              Object.entries(obj).forEach(([k, v]) => next.set(k, String(v)));
-              window.parent.location.replace(
-                window.parent.location.pathname + "?" + next.toString() + window.parent.location.hash
-              );
-            }} catch (e) {{}}
-          }}
-        }} else {{
-          window.parent.localStorage.setItem(KEY, JSON.stringify(fromPython));
-        }}
-        </script>
-        """,
-        height=0,
-    )
+def _clear_legacy_sidebar_query_params() -> None:
+    leftover = [k for k in st.query_params if str(k).startswith("sb_")]
+    if leftover:
+        kept = {k: st.query_params[k] for k in st.query_params if not str(k).startswith("sb_")}
+        st.query_params.from_dict(kept)
 
 
 def render_streamlit_app() -> None:
@@ -780,7 +764,7 @@ def render_streamlit_app() -> None:
         "(Zarattini, Aziz, & Barbon — Univ. of St. Gallen / Swiss Finance Institute)."
     )
 
-    _init_sidebar_from_url()
+    _init_sidebar_from_config()
     with st.sidebar:
         st.header("1. Core Strategy Parameters")
         watchlist_str = st.text_input("Ticker Watchlist (comma-separated)", key="sb_watchlist")
@@ -806,7 +790,7 @@ def render_streamlit_app() -> None:
 
         st.header("3. Push Alert Webhooks")
         # Saved secrets are used when a box is left empty; they are never sent to the browser as default values.
-        # Webhook fields are not persisted across refresh so tokens never land in the URL or localStorage.
+        # Webhook fields are not written to the UI config file.
         alert_fields = []
         for label, secret_name, kind, widget_key in [
             ("Telegram Bot Token", "TELEGRAM_BOT_TOKEN", "password", "tg_token_box"),
@@ -823,8 +807,8 @@ def render_streamlit_app() -> None:
             alert_fields.append(typed.strip() or saved)
         tg_token, tg_chat, discord_url = alert_fields
         feed_mode = st.radio("Data Feed", _FEED_MODES, key="sb_feed_mode")
-        _sync_sidebar_to_url()
-        _persist_sidebar_in_browser()
+        _sync_sidebar_to_config()
+        _clear_legacy_sidebar_query_params()
 
     basket = generate_concretum_demo_basket()
     tickers = [t.strip().upper() for t in watchlist_str.split(",") if t.strip()]
