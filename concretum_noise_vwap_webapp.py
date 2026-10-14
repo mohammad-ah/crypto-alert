@@ -28,6 +28,7 @@ import pathlib
 import re
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import unquote
 
 import numpy as np
 import pandas as pd
@@ -692,6 +693,9 @@ def _coerce_sidebar_value(raw: Any, default: Any) -> Any:
         return default
 
 
+_UI_COOKIE = "concretum_ui"
+
+
 def _load_ui_settings() -> Dict[str, Any]:
     path = _ui_settings_path()
     if not path.exists():
@@ -703,6 +707,21 @@ def _load_ui_settings() -> Dict[str, Any]:
         return {}
 
 
+def _load_browser_settings() -> Dict[str, Any]:
+    """Settings cookie written by this app; survives Streamlit Cloud disk wipes."""
+    try:
+        raw = st.context.cookies.get(_UI_COOKIE, "") if st is not None else ""
+    except Exception:
+        raw = ""
+    if not raw:
+        return {}
+    try:
+        data = json.loads(unquote(str(raw)))
+        return data if isinstance(data, dict) else {}
+    except (TypeError, json.JSONDecodeError):
+        return {}
+
+
 def _sidebar_payload() -> Dict[str, Any]:
     payload = {}
     for key, default in _sidebar_defaults().items():
@@ -711,11 +730,11 @@ def _sidebar_payload() -> Dict[str, Any]:
 
 
 def _init_sidebar_from_config() -> None:
-    """Restore sidebar widgets from state/ui_settings.json. Ignores the URL."""
+    """Restore sidebar widgets from the JSON file, then the browser cookie if the file is gone."""
     if st.session_state.get("_sidebar_inited"):
         return
     defaults = _sidebar_defaults()
-    saved = _load_ui_settings()
+    saved = _load_ui_settings() or _load_browser_settings()
     for key, default in defaults.items():
         st.session_state[key] = _coerce_sidebar_value(saved[key], default) if key in saved else default
     if st.session_state["sb_stop_mode"] not in _STOP_MODES:
@@ -745,6 +764,24 @@ def _sync_sidebar_to_config() -> None:
     path = _ui_settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _persist_sidebar_in_browser() -> None:
+    payload = json.dumps(_sidebar_payload(), separators=(",", ":"))
+    st.components.v1.html(
+        f"""
+        <script>
+        const KEY = "{_UI_COOKIE}";
+        const payload = {payload};
+        try {{
+          const encoded = encodeURIComponent(JSON.stringify(payload));
+          window.parent.document.cookie = KEY + "=" + encoded + "; path=/; max-age=31536000; SameSite=Lax";
+          window.parent.localStorage.setItem(KEY, JSON.stringify(payload));
+        }} catch (e) {{}}
+        </script>
+        """,
+        height=0,
+    )
 
 
 def _clear_legacy_sidebar_query_params() -> None:
@@ -808,6 +845,7 @@ def render_streamlit_app() -> None:
         tg_token, tg_chat, discord_url = alert_fields
         feed_mode = st.radio("Data Feed", _FEED_MODES, key="sb_feed_mode")
         _sync_sidebar_to_config()
+        _persist_sidebar_in_browser()
         _clear_legacy_sidebar_query_params()
 
     basket = generate_concretum_demo_basket()
