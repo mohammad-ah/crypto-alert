@@ -20,6 +20,24 @@ except ImportError:
 STATE_FILE = pathlib.Path("state/last_alerts.json")
 
 
+def env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def ticker_alert_state(sig, use_completed_decision_bar: bool) -> str:
+    """Per-ticker dedup key. Completed-check mode tracks action + stop so a moved stop still alerts."""
+    if use_completed_decision_bar:
+        return f"{sig.action_on_30m_clock}::{sig.active_stop:.2f}"
+    return f"{sig.action_on_30m_clock}::{sig.intraday_regime}"
+
+
+def ticker_alert_is_actionable(sig, use_completed_decision_bar: bool) -> bool:
+    action = sig.action_on_30m_clock
+    if use_completed_decision_bar:
+        return any(k in action for k in ("ENTER_", "REVERSE_", "EXIT_", "HOLD_", "FLAT_EOD"))
+    return any(k in action for k in ("ENTER_", "REVERSE_", "EXIT_")) or "IMBALANCE" in sig.intraday_regime
+
+
 def load_state() -> Dict[str, str]:
     if STATE_FILE.exists():
         try:
@@ -38,7 +56,25 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Concretum Noise Area + VWAP 30m Cron Scanner")
     parser.add_argument("--dry-run", action="store_true", help="Use built-in verification dataset")
     parser.add_argument("--send-alerts", action="store_true", help="Send Telegram/Discord alerts on signal change")
+    parser.add_argument(
+        "--use-completed-decision-bar",
+        dest="use_completed_decision_bar",
+        action="store_true",
+        help="Report the last completed :00/:30 check per ticker (ignores the forming candle).",
+    )
+    parser.add_argument(
+        "--legacy-last-bar",
+        dest="use_completed_decision_bar",
+        action="store_false",
+        help="Keep original last-bar behavior even if USE_COMPLETED_DECISION_BAR is set.",
+    )
+    parser.set_defaults(use_completed_decision_bar=None)
     args = parser.parse_args()
+    use_completed = (
+        env_flag("USE_COMPLETED_DECISION_BAR")
+        if args.use_completed_decision_bar is None
+        else args.use_completed_decision_bar
+    )
 
     watchlist = [s.strip().upper() for s in os.getenv("WATCHLIST", "SPY,QQQ,BITO,NVDA,TSLA,BTC-USD,ETH-USD").split(",") if s.strip()]
     equity = float(os.getenv("ACCOUNT_EQUITY", "100000"))
@@ -64,6 +100,7 @@ def main() -> None:
 
     prev_state = load_state()
     new_state = dict(prev_state)
+    print(f"[mode] use_completed_decision_bar={use_completed} (one Telegram/Discord message per ticker)")
 
     for sym, df_sym in basket.items():
         sig, _ = evaluate_concretum_noise_vwap(
@@ -74,8 +111,9 @@ def main() -> None:
             vol_mult=vm,
             user_bias=bias,
             nr4_boost_mult=1.25,
+            use_completed_decision_bar=use_completed,
         )
-        state_val = f"{sig.action_on_30m_clock}::{sig.intraday_regime}"
+        state_val = ticker_alert_state(sig, use_completed)
         changed = prev_state.get(sym) != state_val
         new_state[sym] = state_val
         print(
@@ -84,8 +122,7 @@ def main() -> None:
             f"VWAP=${sig.session_vwap:,.2f} | Stop=${sig.active_stop:,.2f} | "
             f"Shares={sig.trade_shares} ({sig.effective_leverage:.2f}x) | Changed={changed}"
         )
-        is_actionable = any(k in sig.action_on_30m_clock for k in ("ENTER_", "REVERSE_", "EXIT_")) or "IMBALANCE" in sig.intraday_regime
-        if args.send_alerts and changed and is_actionable:
+        if args.send_alerts and changed and ticker_alert_is_actionable(sig, use_completed):
             ok, info = send_concretum_alert(sig, tg_token, tg_chat, discord_url)
             print(f"   -> Alert sent: {ok} ({info})")
 

@@ -57,8 +57,28 @@ class TestConcretumNoiseVwapStrategy(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("Bad Request", status)
         self.assertEqual(payload["parse_mode"], "HTML")
-        self.assertIn("<b>", payload["text"])
-        self.assertIn("&gt;UB &amp; &gt;VWAP", payload["text"])
+        self.assertIn("<b>KEEP YOUR SPY LONG</b>", payload["text"])
+        self.assertIn(f"<code>${sig.active_stop:,.2f}</code>", payload["text"])
+        self.assertEqual(
+            webapp._markdown_to_telegram_html("*A & B* <x> `σ_open`"),
+            "<b>A &amp; B</b> &lt;x&gt; <code>σ_open</code>",
+        )
+
+    def test_alert_text_for_crypto_and_wait(self):
+        sig, _ = evaluate_concretum_noise_vwap("ETH-USD", self.basket["ETH-USD"], account_equity=100_000.0)
+        text = webapp.format_concretum_alert(sig)
+        self.assertEqual(sig.action_on_30m_clock, "FLAT_WAIT")
+        self.assertTrue(text.startswith("⚪ *ETH-USD: NO TRADE, WAIT*"))
+        self.assertNotIn("09:30", text)
+        self.assertNotIn("UTC", text)
+        # 00:00 UTC is 7 PM CDT in summer and 6 PM CST in winter
+        self.assertRegex(text, r"session open \((7:00 PM CDT|6:00 PM CST)\)")
+
+    def test_alert_times_follow_daylight_saving(self):
+        summer = webapp._alert_time(pd.Timestamp("2026-07-01 00:00", tz="UTC"))
+        winter = webapp._alert_time(pd.Timestamp("2026-12-01 00:00", tz="UTC"))
+        nyse_close = webapp._alert_time(pd.Timestamp("2026-12-01 16:00", tz="America/New_York"))
+        self.assertEqual((summer, winter, nyse_close), ("7:00 PM CDT", "6:00 PM CST", "3:00 PM CST"))
 
     def test_app_stays_locked_without_correct_password(self):
         from streamlit.testing.v1 import AppTest
@@ -104,6 +124,41 @@ class TestConcretumNoiseVwapStrategy(unittest.TestCase):
         tg_call = next(c for c in post.call_args_list if "telegram" in c.args[0])
         self.assertEqual(tg_call.kwargs["json"]["chat_id"], "4242")
         self.assertEqual(at.success[0].value, "Telegram OK | Discord OK")
+
+    def test_completed_decision_bar_keeps_enter_and_exit_after_later_bars(self):
+        eth = self.basket["ETH-USD"]
+        after_enter = eth[eth.index <= pd.Timestamp("2026-10-13 03:35:00")]
+        after_exit = eth[eth.index <= pd.Timestamp("2026-10-13 04:05:00")]
+
+        off_enter, _ = evaluate_concretum_noise_vwap("ETH-USD", after_enter, use_completed_decision_bar=False)
+        on_enter, _ = evaluate_concretum_noise_vwap("ETH-USD", after_enter, use_completed_decision_bar=True)
+        self.assertEqual(off_enter.action_on_30m_clock, "HOLD_LONG")
+        self.assertEqual(on_enter.action_on_30m_clock, "ENTER_LONG")
+
+        off_exit, _ = evaluate_concretum_noise_vwap("ETH-USD", after_exit, use_completed_decision_bar=False)
+        on_exit, _ = evaluate_concretum_noise_vwap("ETH-USD", after_exit, use_completed_decision_bar=True)
+        self.assertEqual(off_exit.action_on_30m_clock, "FLAT_WAIT")
+        self.assertEqual(on_exit.action_on_30m_clock, "EXIT_LONG_STOP")
+
+        full_off, _ = evaluate_concretum_noise_vwap("ETH-USD", eth, use_completed_decision_bar=False)
+        full_on, _ = evaluate_concretum_noise_vwap("ETH-USD", eth, use_completed_decision_bar=True)
+        self.assertEqual(full_off.action_on_30m_clock, "FLAT_WAIT")
+        self.assertEqual(full_on.action_on_30m_clock, "FLAT_WAIT")
+
+    def test_alerts_stay_per_ticker_and_flag_changes_actionable_rules(self):
+        from scanner_cron import ticker_alert_is_actionable, ticker_alert_state
+
+        spy, _ = evaluate_concretum_noise_vwap("SPY", self.basket["SPY"])
+        eth, _ = evaluate_concretum_noise_vwap("ETH-USD", self.basket["ETH-USD"])
+        self.assertNotEqual(spy.ticker, eth.ticker)
+        self.assertNotEqual(ticker_alert_state(spy, False), ticker_alert_state(eth, False))
+        self.assertNotEqual(ticker_alert_state(spy, True), ticker_alert_state(eth, True))
+
+        self.assertEqual(eth.action_on_30m_clock, "FLAT_WAIT")
+        self.assertFalse(ticker_alert_is_actionable(eth, True), "completed-check mode must not spam WAIT")
+        self.assertTrue("HOLD" in spy.action_on_30m_clock)
+        self.assertTrue(ticker_alert_is_actionable(spy, True), "completed-check mode alerts HOLD so a moved stop is sent")
+        self.assertTrue(ticker_alert_is_actionable(spy, False), "legacy mode still alerts IMBALANCE/HOLD preview")
 
 
 if __name__ == "__main__":

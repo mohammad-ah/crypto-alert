@@ -108,6 +108,86 @@ def _markdown_to_telegram_html(msg: str) -> str:
     return re.sub(r"\*([^*]+)\*", r"<b>\1</b>", text)
 
 
+ALERT_TIMEZONE = os.getenv("ALERT_TIMEZONE", "America/Chicago")
+
+
+def _alert_time(ts: pd.Timestamp) -> str:
+    local = ts.tz_convert(ALERT_TIMEZONE)
+    return f"{local:%-I:%M %p} {local.tzname()}"
+
+
+def format_concretum_alert(sig: ConcretumSignal) -> str:
+    """Builds the alert text (Markdown-style *bold* / `code`): what to do first, levels next, details last."""
+    session = session_for_ticker(sig.ticker)
+    is_crypto = session.fractional_units
+    session_day = pd.Timestamp.now(tz=session.tz).normalize()
+    session_open = session_day + pd.Timedelta(minutes=session.open_minute)
+    session_close = session_open + pd.Timedelta(minutes=session.length_minutes)
+    session_open_label = f"session open ({_alert_time(session_open)})"
+    close_by = _alert_time(session_close) + ("" if is_crypto else " (market close)")
+    units = f"{sig.trade_shares:,.4f} units" if is_crypto else f"{int(sig.trade_shares):,} shares"
+    size_line = f"*Size:* `{units}` ≈ `${sig.trade_shares * sig.price:,.0f}` ({sig.effective_leverage:.2f}x your account)"
+    long_stop = f"*Stop:* at each :00 and :30, exit if price is at or below `${sig.active_stop:,.2f}`"
+    short_stop = f"*Stop:* at each :00 and :30, exit if price is at or above `${sig.active_stop:,.2f}`"
+    close_line = f"*Close by:* {close_by} at the latest"
+    a = sig.action_on_30m_clock
+
+    if a.startswith("ENTER_LONG") and "On 30m Close" in a:
+        head = [
+            f"🟡 *GET READY TO BUY {sig.ticker}*",
+            f"Price `${sig.price:,.2f}` is already above the upper band. Buy at the next :00/:30 check "
+            f"if it's still above `${sig.upper_bound:,.2f}` and VWAP `${sig.session_vwap:,.2f}`.",
+            size_line, long_stop, close_line,
+        ]
+    elif a.startswith("ENTER_SHORT") and "On 30m Close" in a:
+        head = [
+            f"🟡 *GET READY TO SELL SHORT {sig.ticker}*",
+            f"Price `${sig.price:,.2f}` is already below the lower band. Short at the next :00/:30 check "
+            f"if it's still below `${sig.lower_bound:,.2f}` and VWAP `${sig.session_vwap:,.2f}`.",
+            size_line, short_stop, close_line,
+        ]
+    elif a in ("ENTER_LONG", "REVERSE_LONG"):
+        head = [
+            f"🟢 *BUY {sig.ticker}*" + (" (close your short first)" if a == "REVERSE_LONG" else ""),
+            f"*Entry:* around `${sig.price:,.2f}`",
+            size_line, long_stop, close_line,
+        ]
+    elif a in ("ENTER_SHORT", "REVERSE_SHORT"):
+        head = [
+            f"🟠 *SELL SHORT {sig.ticker}*" + (" (close your long first)" if a == "REVERSE_SHORT" else ""),
+            f"*Entry:* around `${sig.price:,.2f}`",
+            size_line, short_stop, close_line,
+        ]
+    elif a == "HOLD_LONG":
+        head = [f"🔵 *KEEP YOUR {sig.ticker} LONG*", f"*Move stop to:* `${sig.active_stop:,.2f}` (at each :00 and :30, exit if price is at or below)", close_line]
+    elif a == "HOLD_SHORT":
+        head = [f"🔵 *KEEP YOUR {sig.ticker} SHORT*", f"*Move stop to:* `${sig.active_stop:,.2f}` (at each :00 and :30, exit if price is at or above)", close_line]
+    elif a == "EXIT_LONG_STOP":
+        head = [f"🔴 *CLOSE YOUR {sig.ticker} LONG*", f"Stop hit: price `${sig.price:,.2f}` fell to/below `${sig.active_stop:,.2f}`. Stay out until the next signal."]
+    elif a == "EXIT_SHORT_STOP":
+        head = [f"🔴 *CLOSE YOUR {sig.ticker} SHORT*", f"Stop hit: price `${sig.price:,.2f}` rose to/above `${sig.active_stop:,.2f}`. Stay out until the next signal."]
+    elif a == "FLAT_EOD":
+        head = [f"⚪ *{sig.ticker}: SESSION CLOSED*", "Close any open position. No trades until the next session."]
+    else:
+        head = [
+            f"⚪ *{sig.ticker}: NO TRADE, WAIT*",
+            f"Price `${sig.price:,.2f}` is inside the normal range (`${sig.lower_bound:,.2f}` to `${sig.upper_bound:,.2f}`).",
+            f"*Buy* if a :00/:30 check is above `${sig.upper_bound:,.2f}` and above VWAP `${sig.session_vwap:,.2f}`",
+            f"*Short* if a :00/:30 check is below `${sig.lower_bound:,.2f}` and below VWAP `${sig.session_vwap:,.2f}`",
+        ]
+
+    details = [
+        "",
+        "*Details*",
+        f"Range: `${sig.lower_bound:,.2f}` – `${sig.upper_bound:,.2f}` | VWAP `${sig.session_vwap:,.2f}` | {session_open_label} `${sig.session_open:,.2f}`",
+        f"Volatility: `{sig.daily_vol_14d_pct:.2f}%`/day → target size `{sig.effective_leverage:.2f}x`",
+        f"Trend context: RSI-5 `{sig.prev_rsi5:.1f}` ({sig.gamma_regime}) | {sig.daily_pattern}",
+        f"Last ~30 days backtest: `{sig.backtest_total_return_pct:+.1f}%`, hit rate `{sig.backtest_hit_ratio_pct:.0f}%`, "
+        f"max drawdown `{sig.backtest_mdd_pct:.1f}%` (small sample)",
+    ]
+    return "\n".join(head + details)
+
+
 def send_concretum_alert(
     sig: ConcretumSignal,
     telegram_bot_token: str = "",
@@ -118,20 +198,7 @@ def send_concretum_alert(
     if requests is None:
         return False, "Python `requests` library is not installed."
 
-    bullets = "\n".join([f"  • {r}" for r in sig.reasons])
-    msg = (
-        f"⚡ *CONCRETUM NOISE + VWAP SIGNAL: {sig.ticker} — {sig.action_on_30m_clock}*\n"
-        f"*Intraday Regime:* `{sig.intraday_regime}`\n"
-        f"*Price:* `${sig.price:,.2f}` (09:30 Open: `${sig.session_open:,.2f}` | Prior Close: `${sig.prev_rth_close:,.2f}`)\n"
-        f"*Noise Area Bounds:* Upper `${sig.upper_bound:,.2f}` | Lower `${sig.lower_bound:,.2f}` (σ_open: `{sig.sigma_open_pct:.2f}%`)\n"
-        f"*Session VWAP:* `${sig.session_vwap:,.2f}` | *Active Trailing Stop:* `${sig.active_stop:,.2f}`\n"
-        f"*Vol-Targeted Sizing:* `{sig.effective_leverage:.2f}x` (`{sig.trade_shares}` shares @ 14d Vol `{sig.daily_vol_14d_pct:.2f}%`)\n"
-        f"*Dealer Gamma (Prior RSI-5):* `{sig.prev_rsi5:.1f}` ({sig.gamma_regime})\n"
-        f"*Daily Compression Pattern:* `{sig.daily_pattern}`\n"
-        f"*Why This Trade Makes Sense:*\n{bullets}\n"
-        f"*Backtest Summary:* Net Return `{sig.backtest_total_return_pct:+.1f}%` | "
-        f"Sharpe `{sig.backtest_sharpe:.2f}` | Daily Hit Rate `{sig.backtest_hit_ratio_pct:.0f}%` | MDD `{sig.backtest_mdd_pct:.1f}%`"
-    )
+    msg = format_concretum_alert(sig)
 
     results = []
     all_ok = True
@@ -183,6 +250,7 @@ def evaluate_concretum_noise_vwap(
     filter_mon_early: bool = False,
     commission_per_share: float = 0.0035,
     session: Optional[SessionSpec] = None,
+    use_completed_decision_bar: bool = False,
 ) -> Tuple[ConcretumSignal, pd.DataFrame]:
     """
     Exact 1:1 port of `concretum_noise_area_vwap_strategy.pine`.
@@ -192,6 +260,9 @@ def evaluate_concretum_noise_vwap(
 
     `intra_df` must be indexed in the session timezone (see `download_intraday_bars`).
     If `session` is omitted it is inferred from the ticker (crypto `-USD` pairs -> 24h UTC).
+    If `use_completed_decision_bar` is True, the live signal is the last completed :00/:30
+    (or session-end) check on the latest day, ignoring any still-forming candle after it.
+    Default False keeps the original last-bar + "On 30m Close" preview behavior.
     """
     session = session or session_for_ticker(ticker)
     sess_len = session.length_minutes
@@ -272,6 +343,9 @@ def evaluate_concretum_noise_vwap(
     bt_rows = []
     last_day_pos = 0
     last_day_action = "FLAT_WAIT"
+    last_decision_idx = None
+    last_decision_pos = 0
+    last_decision_action = "FLAT_WAIT"
 
     for d in all_days:
         day_df = df[df["day"] == d]
@@ -360,9 +434,14 @@ def evaluate_concretum_noise_vwap(
                         trades_cnt += 1
                         action_now = "ENTER_SHORT"
 
-            if d == all_days[-1] and i == len(day_df) - 1:
-                last_day_pos = pos
-                last_day_action = action_now
+            if d == all_days[-1]:
+                if is_decision or is_eod:
+                    last_decision_idx = day_df.index[i]
+                    last_decision_pos = pos
+                    last_decision_action = action_now
+                if i == len(day_df) - 1:
+                    last_day_pos = pos
+                    last_day_action = action_now
 
         comm = trades_cnt * max(0.35, commission_per_share * shares)
         net_pnl = gross_pnl - comm
@@ -383,6 +462,14 @@ def evaluate_concretum_noise_vwap(
 
     # 4. Extract Current Bar HUD Metrics (Matching Pine Script HUD Table)
     last_bar = df.iloc[-1]
+    if use_completed_decision_bar:
+        if last_decision_idx is not None:
+            last_bar = df.loc[last_decision_idx]
+            last_day_pos = last_decision_pos
+            last_day_action = last_decision_action
+        else:
+            last_day_pos = 0
+            last_day_action = "FLAT_WAIT"
     cur_day = last_bar["day"]
     px = float(last_bar["close"])
     s_open = float(last_bar["sess_open"])
@@ -405,11 +492,10 @@ def evaluate_concretum_noise_vwap(
     tri_flag = bool(is_triangle.get(cur_day, False))
     ins_flag = bool(is_inside.get(cur_day, False))
     eff_lev = min(max_leverage, raw_lev * (nr4_boost_mult if (nr4_flag or nr7_flag) else 1.0))
-    cur_eq = float(bt_df["aum"].iloc[-1]) if not bt_df.empty else account_equity
     if session.fractional_units:
-        shares = round((cur_eq * eff_lev) / s_open, 4)
+        shares = round((account_equity * eff_lev) / s_open, 4)
     else:
-        shares = max(1, round((cur_eq * eff_lev) / s_open))
+        shares = max(1, round((account_equity * eff_lev) / s_open))
 
     rsi5_val = float(daily_rsi5.get(cur_day, 50.0))
     gamma_txt = (
@@ -425,11 +511,11 @@ def evaluate_concretum_noise_vwap(
 
     if px > ub and px > vwap:
         regime_txt = "BULLISH IMBALANCE (>UB & >VWAP)"
-        if last_day_action == "FLAT_WAIT" and allow_long:
+        if (not use_completed_decision_bar) and last_day_action == "FLAT_WAIT" and allow_long:
             last_day_action = "ENTER_LONG (On 30m Close)"
     elif px < lb and px < vwap:
         regime_txt = "BEARISH IMBALANCE (<LB & <VWAP)"
-        if last_day_action == "FLAT_WAIT" and allow_short:
+        if (not use_completed_decision_bar) and last_day_action == "FLAT_WAIT" and allow_short:
             last_day_action = "ENTER_SHORT (On 30m Close)"
     else:
         regime_txt = "INSIDE NOISE AREA (Equilibrium)"
@@ -581,6 +667,11 @@ def render_streamlit_app() -> None:
         user_bias = st.selectbox("Your Directional Bias Control", ["Both (Long & Short)", "Long Only", "Short Only"])
         nr4_boost = st.slider("NR4 / NR7 Compression Size Multiplier", min_value=1.0, max_value=2.0, value=1.25, step=0.05)
         filter_mon = st.checkbox("Skip Monday Trades Before 10:30 ET", value=False)
+        use_completed = st.checkbox(
+            "Use completed :00/:30 check (ignore forming candle)",
+            value=os.getenv("USE_COMPLETED_DECISION_BAR", "").strip().lower() in {"1", "true", "yes", "on"},
+            help="Off = original last-bar preview. On = live signal is the last finished 30-minute check.",
+        )
 
         st.header("3. Push Alert Webhooks")
         # Saved secrets are used when a box is left empty; they are never sent to the browser as default values.
@@ -632,6 +723,7 @@ def render_streamlit_app() -> None:
             user_bias=user_bias,
             nr4_boost_mult=nr4_boost,
             filter_mon_early=filter_mon,
+            use_completed_decision_bar=use_completed,
         )
         signals.append(sig)
 

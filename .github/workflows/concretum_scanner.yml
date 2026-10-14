@@ -34,6 +34,7 @@ jobs:
           LOOKBACK_DAYS: ${{ vars.LOOKBACK_DAYS || '14' }}
           VOL_MULT: ${{ vars.VOL_MULT || '1.0' }}
           USER_BIAS: ${{ vars.USER_BIAS || 'Both (Long & Short)' }}
+          USE_COMPLETED_DECISION_BAR: ${{ vars.USE_COMPLETED_DECISION_BAR || 'false' }}
         run: python scanner_cron.py --send-alerts
 
       - name: Save deduplication state
