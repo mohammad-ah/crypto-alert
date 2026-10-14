@@ -1,5 +1,7 @@
+import json
 import pathlib
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -84,18 +86,22 @@ class TestConcretumNoiseVwapStrategy(unittest.TestCase):
         from streamlit.testing.v1 import AppTest
 
         app_path = str(pathlib.Path(__file__).resolve().parent.parent / "app.py")
-        with mock.patch.object(webapp, "_app_password", return_value=""):
-            at = AppTest.from_file(app_path).run()
-            self.assertIn("locked", at.error[0].value)
-            self.assertEqual(len(at.subheader), 0)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "ui_settings.json"
+            with mock.patch.object(webapp, "_ui_settings_path", return_value=path), \
+                    mock.patch.object(webapp, "_app_password", return_value=""):
+                at = AppTest.from_file(app_path).run()
+                self.assertIn("locked", at.error[0].value)
+                self.assertEqual(len(at.subheader), 0)
 
-        with mock.patch.object(webapp, "_app_password", return_value="correct-horse"):
-            at = AppTest.from_file(app_path).run()
-            at.text_input[0].input("wrong-guess")
-            at.button[0].click()
-            at.run()
-            self.assertEqual(at.error[0].value, "Incorrect password.")
-            self.assertEqual(len(at.subheader), 0)
+            with mock.patch.object(webapp, "_ui_settings_path", return_value=path), \
+                    mock.patch.object(webapp, "_app_password", return_value="correct-horse"):
+                at = AppTest.from_file(app_path).run()
+                at.text_input[0].input("wrong-guess")
+                at.button[0].click()
+                at.run()
+                self.assertEqual(at.error[0].value, "Incorrect password.")
+                self.assertEqual(len(at.subheader), 0)
 
     def test_push_button_uses_saved_secrets_without_exposing_them(self):
         from streamlit.testing.v1 import AppTest
@@ -106,44 +112,62 @@ class TestConcretumNoiseVwapStrategy(unittest.TestCase):
             "DISCORD_WEBHOOK_URL": "https://discord.example/webhook",
         }
         app_path = str(pathlib.Path(__file__).resolve().parent.parent / "app.py")
-        with mock.patch.object(webapp, "_config_secret", side_effect=lambda name: saved.get(name, "")), \
-                mock.patch.object(webapp, "download_intraday_bars", return_value=pd.DataFrame()), \
-                mock.patch.object(webapp.requests, "post") as post:
-            post.return_value.ok = True
-            at = AppTest.from_file(app_path)
-            at.session_state["authenticated"] = True
-            at.run()
-            alert_boxes = [t for t in at.text_input if t.label in ("Telegram Bot Token", "Telegram Chat ID", "Discord Webhook URL")]
-            self.assertEqual([t.value for t in alert_boxes], ["", "", ""])
-            at.button(key="btn_SPY").click()
-            at.run()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "ui_settings.json"
+            with mock.patch.object(webapp, "_ui_settings_path", return_value=path), \
+                    mock.patch.object(webapp, "_config_secret", side_effect=lambda name: saved.get(name, "")), \
+                    mock.patch.object(webapp, "download_intraday_bars", return_value=pd.DataFrame()), \
+                    mock.patch.object(webapp.requests, "post") as post:
+                post.return_value.ok = True
+                at = AppTest.from_file(app_path)
+                at.session_state["authenticated"] = True
+                at.run()
+                alert_boxes = [t for t in at.text_input if t.label in ("Telegram Bot Token", "Telegram Chat ID", "Discord Webhook URL")]
+                self.assertEqual([t.value for t in alert_boxes], ["", "", ""])
+                at.button(key="btn_SPY").click()
+                at.run()
 
-        urls = [c.args[0] for c in post.call_args_list]
-        self.assertIn("https://api.telegram.org/bot111:saved-token/sendMessage", urls)
-        self.assertIn("https://discord.example/webhook", urls)
-        tg_call = next(c for c in post.call_args_list if "telegram" in c.args[0])
-        self.assertEqual(tg_call.kwargs["json"]["chat_id"], "4242")
-        self.assertEqual(at.success[0].value, "Telegram OK | Discord OK")
+                urls = [c.args[0] for c in post.call_args_list]
+                self.assertIn("https://api.telegram.org/bot111:saved-token/sendMessage", urls)
+                self.assertIn("https://discord.example/webhook", urls)
+                tg_call = next(c for c in post.call_args_list if "telegram" in c.args[0])
+                self.assertEqual(tg_call.kwargs["json"]["chat_id"], "4242")
+                self.assertEqual(at.success[0].value, "Telegram OK | Discord OK")
 
-    def test_sidebar_settings_survive_a_fresh_load_from_query_params(self):
+    def test_sidebar_settings_round_trip_via_config_file(self):
         from streamlit.testing.v1 import AppTest
 
         app_path = str(pathlib.Path(__file__).resolve().parent.parent / "app.py")
-        with mock.patch.object(webapp, "download_intraday_bars", return_value=pd.DataFrame()):
-            at = AppTest.from_file(app_path)
-            at.session_state["authenticated"] = True
-            at.query_params["sb_watchlist"] = "ETH-USD"
-            at.query_params["sb_use_completed"] = "1"
-            at.query_params["sb_equity"] = "250000"
-            at.query_params["sb_user_bias"] = "Long Only"
-            at.run()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "ui_settings.json"
+            path.write_text(
+                json.dumps({
+                    "sb_watchlist": "ETH-USD",
+                    "sb_use_completed": True,
+                    "sb_equity": 250000.0,
+                    "sb_user_bias": "Long Only",
+                }),
+                encoding="utf-8",
+            )
+            with mock.patch.object(webapp, "_ui_settings_path", return_value=path), \
+                    mock.patch.object(webapp, "download_intraday_bars", return_value=pd.DataFrame()):
+                at = AppTest.from_file(app_path)
+                at.session_state["authenticated"] = True
+                at.run()
+                self.assertEqual(at.text_input(key="sb_watchlist").value, "ETH-USD")
+                self.assertTrue(at.checkbox(key="sb_use_completed").value)
+                self.assertEqual(at.number_input(key="sb_equity").value, 250000.0)
+                self.assertEqual(at.selectbox(key="sb_user_bias").value, "Long Only")
+                alert_boxes = [t for t in at.text_input if t.label in ("Telegram Bot Token", "Telegram Chat ID", "Discord Webhook URL")]
+                self.assertEqual([t.value for t in alert_boxes], ["", "", ""])
 
-        self.assertEqual(at.text_input(key="sb_watchlist").value, "ETH-USD")
-        self.assertTrue(at.checkbox(key="sb_use_completed").value)
-        self.assertEqual(at.number_input(key="sb_equity").value, 250000.0)
-        self.assertEqual(at.selectbox(key="sb_user_bias").value, "Long Only")
-        alert_boxes = [t for t in at.text_input if t.label in ("Telegram Bot Token", "Telegram Chat ID", "Discord Webhook URL")]
-        self.assertEqual([t.value for t in alert_boxes], ["", "", ""])
+                at.text_input(key="sb_watchlist").input("BTC-USD")
+                at.run()
+
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["sb_watchlist"], "BTC-USD")
+            self.assertTrue(saved["sb_use_completed"])
+            self.assertNotIn("tg_token_box", saved)
 
     def test_completed_decision_bar_keeps_enter_and_exit_after_later_bars(self):
         eth = self.basket["ETH-USD"]
