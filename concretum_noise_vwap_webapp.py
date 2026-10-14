@@ -19,7 +19,9 @@ HOW TO RUN LOCALLY OR HOST FOR FREE ON STREAMLIT COMMUNITY CLOUD:
 from __future__ import annotations
 
 import datetime as dt
+import html
 import math
+import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -97,6 +99,13 @@ class ConcretumSignal:
     reasons: List[str]
 
 
+def _markdown_to_telegram_html(msg: str) -> str:
+    # Telegram's legacy Markdown rejects the whole message on any unpaired `_` (e.g. "σ_open", "HOLD_LONG")
+    text = html.escape(msg, quote=False)
+    text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+    return re.sub(r"\*([^*]+)\*", r"<b>\1</b>", text)
+
+
 def send_concretum_alert(
     sig: ConcretumSignal,
     telegram_bot_token: str = "",
@@ -123,18 +132,35 @@ def send_concretum_alert(
     )
 
     results = []
+    all_ok = True
     if telegram_bot_token and telegram_chat_id:
-        url = f"https://api.telegram.org/bot{telegram_bot_token}/sendMessage"
-        r = requests.post(url, json={"chat_id": telegram_chat_id, "text": msg, "parse_mode": "Markdown"}, timeout=10)
-        results.append(f"Telegram HTTP {r.status_code}")
+        url = f"https://api.telegram.org/bot{telegram_bot_token.strip()}/sendMessage"
+        r = requests.post(
+            url,
+            json={"chat_id": telegram_chat_id.strip(), "text": _markdown_to_telegram_html(msg), "parse_mode": "HTML"},
+            timeout=10,
+        )
+        if r.ok:
+            results.append("Telegram OK")
+        else:
+            all_ok = False
+            try:
+                detail = r.json().get("description", "")
+            except ValueError:
+                detail = r.text[:200]
+            results.append(f"Telegram HTTP {r.status_code}: {detail}")
 
     if discord_webhook_url:
         r = requests.post(discord_webhook_url, json={"content": msg.replace("*", "**")}, timeout=10)
-        results.append(f"Discord HTTP {r.status_code}")
+        if r.ok:
+            results.append("Discord OK")
+        else:
+            all_ok = False
+            results.append(f"Discord HTTP {r.status_code}: {r.text[:200]}")
 
     if not results:
         return False, "No Telegram or Discord webhook configured."
-    return True, " | ".join(results)
+    return all_ok, " | ".join(results)
 
 
 def evaluate_concretum_noise_vwap(
@@ -576,7 +602,7 @@ def render_streamlit_app() -> None:
             st.write(f"**Daily Pattern Setup:** `{sig.daily_pattern}`")
             if st.button(f"Push {sig.ticker} Alert to Phone", key=f"btn_{sig.ticker}"):
                 ok, status = send_concretum_alert(sig, tg_token, tg_chat, discord_url)
-                st.info(status)
+                (st.success if ok else st.error)(status)
 
     st.subheader("Multi-Ticker Concretum Noise Area + VWAP Scanner Table")
     st.dataframe(

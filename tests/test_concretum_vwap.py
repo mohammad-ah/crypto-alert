@@ -1,11 +1,13 @@
 import pathlib
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
 import pandas as pd
 
+import concretum_noise_vwap_webapp as webapp
 from concretum_noise_vwap_webapp import (
     evaluate_concretum_noise_vwap,
     generate_concretum_demo_basket,
@@ -43,6 +45,20 @@ class TestConcretumNoiseVwapStrategy(unittest.TestCase):
             self.assertTrue(any(pd.Timestamp(d).dayofweek >= 5 for d in bt_df["day"]))
             # whole-share rounding would force at least 1 BTC (~$63k) regardless of the vol target
             self.assertNotEqual(sig.trade_shares, int(sig.trade_shares))
+
+    def test_telegram_payload_is_html_and_failures_are_reported(self):
+        sig, _ = evaluate_concretum_noise_vwap("SPY", self.basket["SPY"])
+        with mock.patch.object(webapp.requests, "post") as post:
+            post.return_value.ok = False
+            post.return_value.status_code = 400
+            post.return_value.json.return_value = {"description": "Bad Request"}
+            ok, status = webapp.send_concretum_alert(sig, "TOKEN", "CHAT")
+        payload = post.call_args.kwargs["json"]
+        self.assertFalse(ok)
+        self.assertIn("Bad Request", status)
+        self.assertEqual(payload["parse_mode"], "HTML")
+        self.assertIn("<b>", payload["text"])
+        self.assertIn("&gt;UB &amp; &gt;VWAP", payload["text"])
 
 
 if __name__ == "__main__":
