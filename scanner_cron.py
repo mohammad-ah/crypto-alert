@@ -6,6 +6,7 @@ import pathlib
 from typing import Dict
 
 from concretum_noise_vwap_webapp import (
+    download_intraday_bars,
     evaluate_concretum_noise_vwap,
     generate_concretum_demo_basket,
     send_concretum_alert,
@@ -39,7 +40,7 @@ def main() -> None:
     parser.add_argument("--send-alerts", action="store_true", help="Send Telegram/Discord alerts on signal change")
     args = parser.parse_args()
 
-    watchlist = [s.strip().upper() for s in os.getenv("WATCHLIST", "SPY,QQQ,BITO,NVDA,TSLA").split(",") if s.strip()]
+    watchlist = [s.strip().upper() for s in os.getenv("WATCHLIST", "SPY,QQQ,BITO,NVDA,TSLA,BTC-USD,ETH-USD").split(",") if s.strip()]
     equity = float(os.getenv("ACCOUNT_EQUITY", "100000"))
     lookback = int(os.getenv("LOOKBACK_DAYS", "14"))
     vm = float(os.getenv("VOL_MULT", "1.0"))
@@ -53,10 +54,8 @@ def main() -> None:
         live_basket = {}
         for sym in watchlist:
             try:
-                dl = yf.download(sym, period="30d", interval="5m", progress=False)
+                dl = download_intraday_bars(sym)
                 if not dl.empty:
-                    dl.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in dl.columns]
-                    dl.index = dl.index.tz_convert("America/New_York").tz_localize(None)
                     live_basket[sym] = dl
             except Exception as exc:
                 print(f"[WARN] Live download failed for {sym}, using fallback: {exc}")

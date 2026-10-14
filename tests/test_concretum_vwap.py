@@ -4,6 +4,8 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
+import pandas as pd
+
 from concretum_noise_vwap_webapp import (
     evaluate_concretum_noise_vwap,
     generate_concretum_demo_basket,
@@ -32,6 +34,15 @@ class TestConcretumNoiseVwapStrategy(unittest.TestCase):
     def test_bias_override_filter(self):
         sig_short_only, _ = evaluate_concretum_noise_vwap("SPY", self.basket["SPY"], user_bias="Short Only")
         self.assertNotIn("ENTER_LONG", sig_short_only.action_on_30m_clock)
+
+    def test_crypto_24h_session_and_fractional_sizing(self):
+        for sym in ("BTC-USD", "ETH-USD"):
+            sig, bt_df = evaluate_concretum_noise_vwap(sym, self.basket[sym], account_equity=100_000.0)
+            self.assertGreater(sig.upper_bound, sig.lower_bound)
+            # 24/7 session: weekend days must be part of the backtest
+            self.assertTrue(any(pd.Timestamp(d).dayofweek >= 5 for d in bt_df["day"]))
+            # whole-share rounding would force at least 1 BTC (~$63k) regardless of the vol target
+            self.assertNotEqual(sig.trade_shares, int(sig.trade_shares))
 
 
 if __name__ == "__main__":

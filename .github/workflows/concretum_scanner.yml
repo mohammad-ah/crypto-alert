@@ -3,8 +3,8 @@ name: Concretum Noise + VWAP 30m Signal Scanner
 on:
   workflow_dispatch:
   schedule:
-    # Runs every 30 minutes during US Regular Trading Hours (14:00 - 21:00 UTC Mon-Fri)
-    - cron: '0,30 14-21 * * 1-5'
+    # Runs every 30 minutes, 24/7, because crypto (BTC-USD, ETH-USD) never closes
+    - cron: '0,30 * * * *'
 
 jobs:
   scan_concretum_signals:
@@ -29,7 +29,7 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-          WATCHLIST: ${{ vars.WATCHLIST || 'SPY,QQQ,BITO,NVDA,TSLA' }}
+          WATCHLIST: ${{ vars.WATCHLIST || 'SPY,QQQ,BITO,NVDA,TSLA,BTC-USD,ETH-USD' }}
           ACCOUNT_EQUITY: ${{ vars.ACCOUNT_EQUITY || '100000' }}
           LOOKBACK_DAYS: ${{ vars.LOOKBACK_DAYS || '14' }}
           VOL_MULT: ${{ vars.VOL_MULT || '1.0' }}

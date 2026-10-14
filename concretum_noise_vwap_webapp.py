@@ -9,6 +9,8 @@ based on:
   (SPY, QQQ, BITO/IBIT) and top liquid US stocks (NVDA, TSLA, AMD, META, AAPL, MSFT)
   achieves a portfolio Sharpe Ratio > 2.0.
 
+Crypto tickers in Yahoo format (BTC-USD, ETH-USD) use a 24h UTC session instead of 09:30-16:00 ET.
+
 HOW TO RUN LOCALLY OR HOST FOR FREE ON STREAMLIT COMMUNITY CLOUD:
     pip install streamlit pandas numpy yfinance requests pytz
     streamlit run concretum_noise_vwap_webapp.py
@@ -19,7 +21,7 @@ from __future__ import annotations
 import datetime as dt
 import math
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -40,6 +42,35 @@ except ImportError:
     st = None
 
 
+@dataclass(frozen=True)
+class SessionSpec:
+    tz: str                      # timezone the bar index is converted to before stripping tz info
+    open_minute: int             # minutes after local midnight when the session opens
+    length_minutes: int
+    periods_per_year: int        # trading days per year, used to annualize the backtest Sharpe
+    fractional_units: bool
+
+
+US_EQUITY_RTH = SessionSpec("America/New_York", 9 * 60 + 30, 390, 252, False)
+CRYPTO_24H = SessionSpec("UTC", 0, 1440, 365, True)
+
+
+def session_for_ticker(ticker: str) -> SessionSpec:
+    return CRYPTO_24H if ticker.upper().endswith("-USD") else US_EQUITY_RTH
+
+
+def download_intraday_bars(ticker: str, period: str = "30d", interval: str = "5m") -> pd.DataFrame:
+    """Downloads Yahoo Finance bars with lowercase columns and a tz-naive index in the ticker's session timezone."""
+    if yf is None:
+        raise RuntimeError("yfinance is not installed")
+    dl = yf.download(ticker, period=period, interval=interval, progress=False)
+    if dl.empty:
+        return dl
+    dl.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in dl.columns]
+    dl.index = dl.index.tz_convert(session_for_ticker(ticker).tz).tz_localize(None)
+    return dl
+
+
 @dataclass
 class ConcretumSignal:
     ticker: str
@@ -55,7 +86,7 @@ class ConcretumSignal:
     sigma_open_pct: float
     daily_vol_14d_pct: float
     effective_leverage: float
-    trade_shares: int
+    trade_shares: float          # whole shares for equities, fractional units for crypto
     prev_rsi5: float
     gamma_regime: str
     daily_pattern: str
@@ -123,24 +154,30 @@ def evaluate_concretum_noise_vwap(
     nr4_boost_mult: float = 1.0,
     filter_mon_early: bool = False,
     commission_per_share: float = 0.0035,
+    session: Optional[SessionSpec] = None,
 ) -> Tuple[ConcretumSignal, pd.DataFrame]:
     """
     Exact 1:1 port of `concretum_noise_area_vwap_strategy.pine`.
     Computes the 2D [day, minute_from_open] Noise Area matrix, gap-adjusted UB/LB,
     RTH session VWAP, 30-min decision grid, dynamic trailing stop, 14d sample std
     volatility targeting, Dealer Gamma RSI(5), and NR4/NR7/Inside/Triangle patterns.
+
+    `intra_df` must be indexed in the session timezone (see `download_intraday_bars`).
+    If `session` is omitted it is inferred from the ticker (crypto `-USD` pairs -> 24h UTC).
     """
+    session = session or session_for_ticker(ticker)
+    sess_len = session.length_minutes
     df = intra_df.copy()
     df["day"] = df.index.date
-    # Calculate bar close minute from 09:30 ET open (assuming 5-min bars if index is bar open)
+    # Calculate bar close minute from session open (assuming 5-min bars if index is bar open)
     step_mins = 5
     if len(df) > 1:
         diffs = pd.Series(df.index).diff().dt.total_seconds().div(60).dropna()
         if not diffs.empty:
             step_mins = int(max(1, min(60, round(diffs.median()))))
 
-    df["min_from_open"] = (df.index.hour * 60 + df.index.minute) - (9 * 60 + 30)
-    df = df[(df["min_from_open"] >= 0) & (df["min_from_open"] <= 390)].copy()
+    df["min_from_open"] = (df.index.hour * 60 + df.index.minute) - session.open_minute
+    df = df[(df["min_from_open"] >= 0) & (df["min_from_open"] <= sess_len)].copy()
     df["bar_close_min"] = df["min_from_open"] + step_mins
 
     # 1. Daily stats strictly from completed prior daily bars [1..vol_lookback] (zero lookahead)
@@ -222,7 +259,10 @@ def evaluate_concretum_noise_vwap(
         )
         pat_boost = nr4_boost_mult if (bool(is_nr4.get(d, False)) or bool(is_nr7.get(d, False))) else 1.0
         eff_lev = min(max_leverage, raw_lev * pat_boost)
-        shares = max(1, round((aum * eff_lev) / s_open))
+        if session.fractional_units:
+            shares = round((aum * eff_lev) / s_open, 4)
+        else:
+            shares = max(1, round((aum * eff_lev) / s_open))
 
         pos = 0
         trades_cnt = 0
@@ -253,8 +293,8 @@ def evaluate_concretum_noise_vwap(
             l_sig = (c_px > ub_i) and (c_px > vw_i)
             s_sig = (c_px < lb_i) and (c_px < vw_i)
 
-            is_eod = b_min >= (390 - step_mins)
-            is_decision = (b_min >= trade_freq_min) and (b_min < 390) and (b_min % trade_freq_min == 0)
+            is_eod = b_min >= (sess_len - step_mins)
+            is_decision = (b_min >= trade_freq_min) and (b_min < sess_len) and (b_min % trade_freq_min == 0)
             mon_skip = filter_mon_early and is_monday and (b_min < 60)
 
             action_now = "HOLD_LONG" if pos > 0 else ("HOLD_SHORT" if pos < 0 else "FLAT_WAIT")
@@ -306,7 +346,7 @@ def evaluate_concretum_noise_vwap(
     if not bt_df.empty and len(bt_df) > 2:
         tot_ret = (bt_df["aum"].iloc[-1] / account_equity - 1.0) * 100.0
         std_r = bt_df["ret"].std(ddof=1)
-        sharpe = (bt_df["ret"].mean() / std_r * math.sqrt(252.0)) if std_r > 0 else 0.0
+        sharpe = (bt_df["ret"].mean() / std_r * math.sqrt(session.periods_per_year)) if std_r > 0 else 0.0
         traded = bt_df[bt_df["trades"] > 0]
         hit_ratio = ((traded["ret"] > 0).mean() * 100.0) if not traded.empty else 0.0
         mdd = ((bt_df["aum"] / bt_df["aum"].cummax() - 1.0).min() * -100.0)
@@ -338,7 +378,10 @@ def evaluate_concretum_noise_vwap(
     ins_flag = bool(is_inside.get(cur_day, False))
     eff_lev = min(max_leverage, raw_lev * (nr4_boost_mult if (nr4_flag or nr7_flag) else 1.0))
     cur_eq = float(bt_df["aum"].iloc[-1]) if not bt_df.empty else account_equity
-    shares = max(1, round((cur_eq * eff_lev) / s_open))
+    if session.fractional_units:
+        shares = round((cur_eq * eff_lev) / s_open, 4)
+    else:
+        shares = max(1, round((cur_eq * eff_lev) / s_open))
 
     rsi5_val = float(daily_rsi5.get(cur_day, 50.0))
     gamma_txt = (
@@ -398,7 +441,7 @@ def evaluate_concretum_noise_vwap(
 
 
 def generate_concretum_demo_basket() -> Dict[str, pd.DataFrame]:
-    """Generates realistic 5-minute intraday RTH bars across SPY, QQQ, BITO, NVDA, TSLA for offline testing."""
+    """Generates realistic 5-minute bars across SPY, QQQ, BITO, NVDA, TSLA (RTH) and BTC-USD, ETH-USD (24/7 UTC) for offline testing."""
     rng = np.random.default_rng(7)
     b_days = pd.bdate_range("2026-09-08", "2026-10-13")
     specs = [
@@ -427,6 +470,29 @@ def generate_concretum_demo_basket() -> Dict[str, pd.DataFrame]:
                 rows.append({"dt": ts, "open": o, "high": h, "low": l, "close": c, "volume": v})
                 px = c
         basket[sym] = pd.DataFrame(rows).set_index("dt")
+
+    c_days = pd.date_range("2026-09-08", "2026-10-13", freq="D")
+    crypto_specs = [
+        ("BTC-USD", 63_000.0, 0.00010, 0.0015, (5.0, 60.0)),
+        ("ETH-USD", 2_600.0, -0.00012, 0.0020, (200.0, 2_000.0)),
+    ]
+    for sym, start_px, last_day_drift, bar_sigma, (v_lo, v_hi) in crypto_specs:
+        rows = []
+        px = start_px
+        for d_idx, d in enumerate(c_days):
+            is_last = d_idx == len(c_days) - 1
+            drift = last_day_drift if is_last else rng.choice([-0.00004, 0.00005, 0.0], p=[0.35, 0.40, 0.25])
+            scale_range = 0.55 if d_idx == len(c_days) - 2 else 1.0
+            for m in range(0, 1440, 5):
+                ts = dt.datetime.combine(d.date(), dt.time(0, 0)) + dt.timedelta(minutes=m)
+                o = px
+                c = o * (1.0 + drift + rng.normal(0, bar_sigma * scale_range))
+                h = max(o, c) * (1.0 + abs(rng.normal(0, bar_sigma * 0.45 * scale_range)))
+                l = min(o, c) * (1.0 - abs(rng.normal(0, bar_sigma * 0.45 * scale_range)))
+                v = float(rng.uniform(v_lo, v_hi))
+                rows.append({"dt": ts, "open": o, "high": h, "low": l, "close": c, "volume": v})
+                px = c
+        basket[sym] = pd.DataFrame(rows).set_index("dt")
     return basket
 
 
@@ -440,7 +506,7 @@ def render_streamlit_app() -> None:
 
     with st.sidebar:
         st.header("1. Core Strategy Parameters")
-        watchlist_str = st.text_input("Ticker Watchlist (comma-separated)", value="SPY,QQQ,BITO,NVDA,TSLA")
+        watchlist_str = st.text_input("Ticker Watchlist (comma-separated)", value="SPY,QQQ,BITO,NVDA,TSLA,BTC-USD,ETH-USD")
         equity = st.number_input("Account Capital ($)", min_value=1000.0, value=100000.0, step=5000.0)
         lookback_days = st.slider("Sigma Lookback Window (Days)", min_value=5, max_value=90, value=14)
         vol_mult = st.slider("Volatility Multiplier (VM)", min_value=0.5, max_value=2.5, value=1.0, step=0.05)
@@ -469,10 +535,8 @@ def render_streamlit_app() -> None:
         live_basket = {}
         for sym in tickers:
             try:
-                dl = yf.download(sym, period="30d", interval="5m", progress=False)
+                dl = download_intraday_bars(sym)
                 if not dl.empty:
-                    dl.columns = [c[0].lower() if isinstance(c, tuple) else c.lower() for c in dl.columns]
-                    dl.index = dl.index.tz_convert("America/New_York").tz_localize(None)
                     live_basket[sym] = dl
             except Exception as exc:
                 st.warning(f"Fallback to built-in data for {sym}: {exc}")
