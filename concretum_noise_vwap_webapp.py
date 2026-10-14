@@ -21,11 +21,12 @@ from __future__ import annotations
 import datetime as dt
 import hmac
 import html
+import json
 import math
 import os
 import re
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -640,6 +641,135 @@ def _password_gate() -> bool:
     return False
 
 
+_STOP_MODES = ["Curr.Band + VWAP", "VWAP Only", "Opposite Band"]
+_TRADE_FREQS = [30, 15, 60, 5]
+_SIZING_MODES = ["Volatility Target (Paper Dynamic)", "Full Notional (100% Equity)"]
+_BIAS_MODES = ["Both (Long & Short)", "Long Only", "Short Only"]
+_FEED_MODES = ["Live Yahoo Finance (5m RTH)", "Built-in Verification Dataset"]
+
+
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _sidebar_defaults() -> Dict[str, Any]:
+    return {
+        "sb_watchlist": "SPY,QQQ,BITO,NVDA,TSLA,BTC-USD,ETH-USD",
+        "sb_equity": 100000.0,
+        "sb_lookback_days": 14,
+        "sb_vol_mult": 1.0,
+        "sb_use_gap": True,
+        "sb_stop_mode": _STOP_MODES[0],
+        "sb_trade_freq": 30,
+        "sb_sizing_mode": _SIZING_MODES[0],
+        "sb_target_vol_pct": 2.0,
+        "sb_max_lev": 4.0,
+        "sb_user_bias": _BIAS_MODES[0],
+        "sb_nr4_boost": 1.25,
+        "sb_filter_mon": False,
+        "sb_use_completed": _env_flag("USE_COMPLETED_DECISION_BAR"),
+        "sb_feed_mode": _FEED_MODES[0],
+    }
+
+
+def _parse_sidebar_value(key: str, raw: str, default: Any) -> Any:
+    try:
+        if isinstance(default, bool):
+            return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+        if isinstance(default, int) and not isinstance(default, bool):
+            return int(float(raw))
+        if isinstance(default, float):
+            return float(raw)
+        return str(raw)
+    except (TypeError, ValueError):
+        return default
+
+
+def _qp_get(key: str) -> Optional[str]:
+    if key not in st.query_params:
+        return None
+    val = st.query_params[key]
+    if isinstance(val, list):
+        return str(val[0]) if val else None
+    return str(val)
+
+
+def _init_sidebar_from_url() -> None:
+    """Restore sidebar widgets from the URL on a fresh browser load (session_state is empty after refresh)."""
+    if st.session_state.get("_sidebar_inited"):
+        return
+    defaults = _sidebar_defaults()
+    for key, default in defaults.items():
+        raw = _qp_get(key)
+        st.session_state[key] = _parse_sidebar_value(key, raw, default) if raw is not None else default
+    if st.session_state["sb_stop_mode"] not in _STOP_MODES:
+        st.session_state["sb_stop_mode"] = defaults["sb_stop_mode"]
+    if st.session_state["sb_trade_freq"] not in _TRADE_FREQS:
+        st.session_state["sb_trade_freq"] = defaults["sb_trade_freq"]
+    if st.session_state["sb_sizing_mode"] not in _SIZING_MODES:
+        st.session_state["sb_sizing_mode"] = defaults["sb_sizing_mode"]
+    if st.session_state["sb_user_bias"] not in _BIAS_MODES:
+        st.session_state["sb_user_bias"] = defaults["sb_user_bias"]
+    if st.session_state["sb_feed_mode"] not in _FEED_MODES:
+        st.session_state["sb_feed_mode"] = defaults["sb_feed_mode"]
+    st.session_state["sb_lookback_days"] = min(90, max(5, int(st.session_state["sb_lookback_days"])))
+    st.session_state["sb_vol_mult"] = min(2.5, max(0.5, float(st.session_state["sb_vol_mult"])))
+    st.session_state["sb_target_vol_pct"] = min(6.0, max(0.5, float(st.session_state["sb_target_vol_pct"])))
+    st.session_state["sb_max_lev"] = min(4.0, max(1.0, float(st.session_state["sb_max_lev"])))
+    st.session_state["sb_nr4_boost"] = min(2.0, max(1.0, float(st.session_state["sb_nr4_boost"])))
+    st.session_state["sb_equity"] = max(1000.0, float(st.session_state["sb_equity"]))
+    st.session_state["_sidebar_inited"] = True
+
+
+def _encode_sidebar_params() -> Dict[str, str]:
+    payload = {}
+    for key, default in _sidebar_defaults().items():
+        val = st.session_state.get(key, default)
+        if isinstance(val, bool):
+            payload[key] = "1" if val else "0"
+        else:
+            payload[key] = str(val)
+    return payload
+
+
+def _sync_sidebar_to_url() -> None:
+    payload = _encode_sidebar_params()
+    current = {key: _qp_get(key) for key in payload}
+    if current != payload:
+        st.query_params.from_dict(payload)
+
+
+def _persist_sidebar_in_browser() -> None:
+    """Keep a localStorage copy so settings also come back if the app is opened without query params."""
+    payload = json.dumps(_encode_sidebar_params())
+    st.components.v1.html(
+        f"""
+        <script>
+        const KEY = "concretum_sidebar_v1";
+        const fromPython = {payload};
+        const params = new URLSearchParams(window.parent.location.search);
+        const hasSidebar = Array.from(params.keys()).some((k) => k.startsWith("sb_"));
+        if (!hasSidebar) {{
+          const saved = window.parent.localStorage.getItem(KEY);
+          if (saved) {{
+            try {{
+              const obj = JSON.parse(saved);
+              const next = new URLSearchParams();
+              Object.entries(obj).forEach(([k, v]) => next.set(k, String(v)));
+              window.parent.location.replace(
+                window.parent.location.pathname + "?" + next.toString() + window.parent.location.hash
+              );
+            }} catch (e) {{}}
+          }}
+        }} else {{
+          window.parent.localStorage.setItem(KEY, JSON.stringify(fromPython));
+        }}
+        </script>
+        """,
+        height=0,
+    )
+
+
 def render_streamlit_app() -> None:
     st.set_page_config(page_title="Concretum Noise Area + VWAP Signal Hub", layout="wide")
     if not _password_gate():
@@ -650,46 +780,51 @@ def render_streamlit_app() -> None:
         "(Zarattini, Aziz, & Barbon — Univ. of St. Gallen / Swiss Finance Institute)."
     )
 
+    _init_sidebar_from_url()
     with st.sidebar:
         st.header("1. Core Strategy Parameters")
-        watchlist_str = st.text_input("Ticker Watchlist (comma-separated)", value="SPY,QQQ,BITO,NVDA,TSLA,BTC-USD,ETH-USD")
-        equity = st.number_input("Account Capital ($)", min_value=1000.0, value=100000.0, step=5000.0)
-        lookback_days = st.slider("Sigma Lookback Window (Days)", min_value=5, max_value=90, value=14)
-        vol_mult = st.slider("Volatility Multiplier (VM)", min_value=0.5, max_value=2.5, value=1.0, step=0.05)
-        use_gap = st.checkbox("Adjust Noise Area for Overnight Gaps", value=True)
-        stop_mode = st.selectbox("Trailing Stop Formula", ["Curr.Band + VWAP", "VWAP Only", "Opposite Band"])
-        trade_freq = st.selectbox("Decision & Stop Interval (Minutes)", [30, 15, 60, 5], index=0)
+        watchlist_str = st.text_input("Ticker Watchlist (comma-separated)", key="sb_watchlist")
+        equity = st.number_input("Account Capital ($)", min_value=1000.0, step=5000.0, key="sb_equity")
+        lookback_days = st.slider("Sigma Lookback Window (Days)", min_value=5, max_value=90, key="sb_lookback_days")
+        vol_mult = st.slider("Volatility Multiplier (VM)", min_value=0.5, max_value=2.5, step=0.05, key="sb_vol_mult")
+        use_gap = st.checkbox("Adjust Noise Area for Overnight Gaps", key="sb_use_gap")
+        stop_mode = st.selectbox("Trailing Stop Formula", _STOP_MODES, key="sb_stop_mode")
+        trade_freq = st.selectbox("Decision & Stop Interval (Minutes)", _TRADE_FREQS, key="sb_trade_freq")
 
         st.header("2. Volatility Sizing & Context Bias")
-        sizing_mode = st.selectbox("Position Sizing Method", ["Volatility Target (Paper Dynamic)", "Full Notional (100% Equity)"])
-        target_vol_pct = st.slider("Target Daily Volatility (%)", min_value=0.5, max_value=6.0, value=2.0, step=0.25)
-        max_lev = st.slider("Max Broker Leverage Cap (x)", min_value=1.0, max_value=4.0, value=4.0, step=0.5)
-        user_bias = st.selectbox("Your Directional Bias Control", ["Both (Long & Short)", "Long Only", "Short Only"])
-        nr4_boost = st.slider("NR4 / NR7 Compression Size Multiplier", min_value=1.0, max_value=2.0, value=1.25, step=0.05)
-        filter_mon = st.checkbox("Skip Monday Trades Before 10:30 ET", value=False)
+        sizing_mode = st.selectbox("Position Sizing Method", _SIZING_MODES, key="sb_sizing_mode")
+        target_vol_pct = st.slider("Target Daily Volatility (%)", min_value=0.5, max_value=6.0, step=0.25, key="sb_target_vol_pct")
+        max_lev = st.slider("Max Broker Leverage Cap (x)", min_value=1.0, max_value=4.0, step=0.5, key="sb_max_lev")
+        user_bias = st.selectbox("Your Directional Bias Control", _BIAS_MODES, key="sb_user_bias")
+        nr4_boost = st.slider("NR4 / NR7 Compression Size Multiplier", min_value=1.0, max_value=2.0, step=0.05, key="sb_nr4_boost")
+        filter_mon = st.checkbox("Skip Monday Trades Before 10:30 ET", key="sb_filter_mon")
         use_completed = st.checkbox(
             "Use completed :00/:30 check (ignore forming candle)",
-            value=os.getenv("USE_COMPLETED_DECISION_BAR", "").strip().lower() in {"1", "true", "yes", "on"},
+            key="sb_use_completed",
             help="Off = original last-bar preview. On = live signal is the last finished 30-minute check.",
         )
 
         st.header("3. Push Alert Webhooks")
         # Saved secrets are used when a box is left empty; they are never sent to the browser as default values.
+        # Webhook fields are not persisted across refresh so tokens never land in the URL or localStorage.
         alert_fields = []
-        for label, secret_name, kind in [
-            ("Telegram Bot Token", "TELEGRAM_BOT_TOKEN", "password"),
-            ("Telegram Chat ID", "TELEGRAM_CHAT_ID", "default"),
-            ("Discord Webhook URL", "DISCORD_WEBHOOK_URL", "password"),
+        for label, secret_name, kind, widget_key in [
+            ("Telegram Bot Token", "TELEGRAM_BOT_TOKEN", "password", "tg_token_box"),
+            ("Telegram Chat ID", "TELEGRAM_CHAT_ID", "default", "tg_chat_box"),
+            ("Discord Webhook URL", "DISCORD_WEBHOOK_URL", "password", "discord_box"),
         ]:
             saved = _config_secret(secret_name)
             typed = st.text_input(
                 label,
                 type=kind,
+                key=widget_key,
                 placeholder="Using saved secret (type to override)" if saved else "",
             )
             alert_fields.append(typed.strip() or saved)
         tg_token, tg_chat, discord_url = alert_fields
-        feed_mode = st.radio("Data Feed", ["Live Yahoo Finance (5m RTH)", "Built-in Verification Dataset"])
+        feed_mode = st.radio("Data Feed", _FEED_MODES, key="sb_feed_mode")
+        _sync_sidebar_to_url()
+        _persist_sidebar_in_browser()
 
     basket = generate_concretum_demo_basket()
     tickers = [t.strip().upper() for t in watchlist_str.split(",") if t.strip()]

@@ -125,6 +125,26 @@ class TestConcretumNoiseVwapStrategy(unittest.TestCase):
         self.assertEqual(tg_call.kwargs["json"]["chat_id"], "4242")
         self.assertEqual(at.success[0].value, "Telegram OK | Discord OK")
 
+    def test_sidebar_settings_survive_a_fresh_load_from_query_params(self):
+        from streamlit.testing.v1 import AppTest
+
+        app_path = str(pathlib.Path(__file__).resolve().parent.parent / "app.py")
+        with mock.patch.object(webapp, "download_intraday_bars", return_value=pd.DataFrame()):
+            at = AppTest.from_file(app_path)
+            at.session_state["authenticated"] = True
+            at.query_params["sb_watchlist"] = "ETH-USD"
+            at.query_params["sb_use_completed"] = "1"
+            at.query_params["sb_equity"] = "250000"
+            at.query_params["sb_user_bias"] = "Long Only"
+            at.run()
+
+        self.assertEqual(at.text_input(key="sb_watchlist").value, "ETH-USD")
+        self.assertTrue(at.checkbox(key="sb_use_completed").value)
+        self.assertEqual(at.number_input(key="sb_equity").value, 250000.0)
+        self.assertEqual(at.selectbox(key="sb_user_bias").value, "Long Only")
+        alert_boxes = [t for t in at.text_input if t.label in ("Telegram Bot Token", "Telegram Chat ID", "Discord Webhook URL")]
+        self.assertEqual([t.value for t in alert_boxes], ["", "", ""])
+
     def test_completed_decision_bar_keeps_enter_and_exit_after_later_bars(self):
         eth = self.basket["ETH-USD"]
         after_enter = eth[eth.index <= pd.Timestamp("2026-10-13 03:35:00")]
