@@ -791,10 +791,49 @@ def _clear_legacy_sidebar_query_params() -> None:
         st.query_params.from_dict(kept)
 
 
+def _inject_mobile_layout_css() -> None:
+    st.markdown(
+        """
+        <style>
+        @media (max-width: 768px) {
+          [data-testid="stHorizontalBlock"] {
+            flex-wrap: wrap !important;
+            gap: 0.75rem !important;
+          }
+          [data-testid="stHorizontalBlock"] > [data-testid="column"] {
+            min-width: 100% !important;
+            width: 100% !important;
+            flex: 1 1 100% !important;
+          }
+          [data-testid="stDataFrame"],
+          [data-testid="stDataFrame"] > div {
+            max-width: 100% !important;
+          }
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_signal_card(sig: ConcretumSignal, tg_token: str, tg_chat: str, discord_url: str) -> None:
+    st.subheader(f"{sig.ticker} — {sig.action_on_30m_clock}")
+    st.metric("Intraday Regime", sig.intraday_regime, f"Sharpe: {sig.backtest_sharpe:.2f}")
+    st.write(f"**Price:** `${sig.price:,.2f}` | **Upper / Lower Bound:** `${sig.upper_bound:,.2f}` / `${sig.lower_bound:,.2f}`")
+    st.write(f"**Session VWAP / Active Stop:** `${sig.session_vwap:,.2f}` / `${sig.active_stop:,.2f}`")
+    st.write(f"**14d Daily Vol / Target Size:** `{sig.daily_vol_14d_pct:.2f}%` → `{sig.effective_leverage:.2f}x` (`{sig.trade_shares}` sh)")
+    st.write(f"**Dealer Gamma (Prior RSI-5):** `{sig.prev_rsi5:.1f}` | {sig.gamma_regime}")
+    st.write(f"**Daily Pattern Setup:** `{sig.daily_pattern}`")
+    if st.button(f"Push {sig.ticker} Alert to Phone", key=f"btn_{sig.ticker}"):
+        ok, status = send_concretum_alert(sig, tg_token, tg_chat, discord_url)
+        (st.success if ok else st.error)(status)
+
+
 def render_streamlit_app() -> None:
     st.set_page_config(page_title="Concretum Noise Area + VWAP Signal Hub", layout="wide")
     if not _password_gate():
         return
+    _inject_mobile_layout_css()
     st.title("🎯 Concretum Intraday Noise Area + VWAP Signal App")
     st.caption(
         "Exact 1:1 Python & Multi-Ticker Scanner port of `concretum_noise_area_vwap_strategy.pine` "
@@ -804,7 +843,12 @@ def render_streamlit_app() -> None:
     _init_sidebar_from_config()
     with st.sidebar:
         st.header("1. Core Strategy Parameters")
-        watchlist_str = st.text_input("Ticker Watchlist (comma-separated)", key="sb_watchlist")
+        watchlist_str = st.text_area(
+            "Ticker Watchlist (comma-separated)",
+            key="sb_watchlist",
+            height=88,
+            help="Shown as a wrapping box so the last ticker stays visible on a phone.",
+        )
         equity = st.number_input("Account Capital ($)", min_value=1000.0, step=5000.0, key="sb_equity")
         lookback_days = st.slider("Sigma Lookback Window (Days)", min_value=5, max_value=90, key="sb_lookback_days")
         vol_mult = st.slider("Volatility Multiplier (VM)", min_value=0.5, max_value=2.5, step=0.05, key="sb_vol_mult")
@@ -863,6 +907,11 @@ def render_streamlit_app() -> None:
         if live_basket:
             basket = live_basket
 
+    if tickers:
+        ordered = [(sym, basket[sym]) for sym in tickers if sym in basket]
+        if ordered:
+            basket = dict(ordered)
+
     signals: List[ConcretumSignal] = []
     for sym, df_sym in basket.items():
         sig, _ = evaluate_concretum_noise_vwap(
@@ -884,20 +933,13 @@ def render_streamlit_app() -> None:
         )
         signals.append(sig)
 
-    # Display HUD Cards for Each Ticker (Identical to Pine Script HUD)
-    cols = st.columns(min(3, max(1, len(signals))))
-    for idx, sig in enumerate(signals):
-        with cols[idx % len(cols)]:
-            st.subheader(f"{sig.ticker} — {sig.action_on_30m_clock}")
-            st.metric("Intraday Regime", sig.intraday_regime, f"Sharpe: {sig.backtest_sharpe:.2f}")
-            st.write(f"**Price:** `${sig.price:,.2f}` | **Upper / Lower Bound:** `${sig.upper_bound:,.2f}` / `${sig.lower_bound:,.2f}`")
-            st.write(f"**Session VWAP / Active Stop:** `${sig.session_vwap:,.2f}` / `${sig.active_stop:,.2f}`")
-            st.write(f"**14d Daily Vol / Target Size:** `{sig.daily_vol_14d_pct:.2f}%` → `{sig.effective_leverage:.2f}x` (`{sig.trade_shares}` sh)")
-            st.write(f"**Dealer Gamma (Prior RSI-5):** `{sig.prev_rsi5:.1f}` | {sig.gamma_regime}")
-            st.write(f"**Daily Pattern Setup:** `{sig.daily_pattern}`")
-            if st.button(f"Push {sig.ticker} Alert to Phone", key=f"btn_{sig.ticker}"):
-                ok, status = send_concretum_alert(sig, tg_token, tg_chat, discord_url)
-                (st.success if ok else st.error)(status)
+    # One row of up to 3 cards; leftover tickers (ETH) get a full-width row instead of a squeezed 1/3 column.
+    for start in range(0, len(signals), 3):
+        chunk = signals[start : start + 3]
+        cols = st.columns(len(chunk))
+        for col, sig in zip(cols, chunk):
+            with col:
+                _render_signal_card(sig, tg_token, tg_chat, discord_url)
 
     st.subheader("Multi-Ticker Concretum Noise Area + VWAP Scanner Table")
     st.dataframe(
@@ -919,6 +961,8 @@ def render_streamlit_app() -> None:
             for s in signals
         ]),
         use_container_width=True,
+        hide_index=True,
+        height=int(38 * (len(signals) + 2)),
     )
 
 

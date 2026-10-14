@@ -154,14 +154,14 @@ class TestConcretumNoiseVwapStrategy(unittest.TestCase):
                 at = AppTest.from_file(app_path)
                 at.session_state["authenticated"] = True
                 at.run()
-                self.assertEqual(at.text_input(key="sb_watchlist").value, "ETH-USD")
+                self.assertEqual(at.text_area(key="sb_watchlist").value, "ETH-USD")
                 self.assertTrue(at.checkbox(key="sb_use_completed").value)
                 self.assertEqual(at.number_input(key="sb_equity").value, 250000.0)
                 self.assertEqual(at.selectbox(key="sb_user_bias").value, "Long Only")
                 alert_boxes = [t for t in at.text_input if t.label in ("Telegram Bot Token", "Telegram Chat ID", "Discord Webhook URL")]
                 self.assertEqual([t.value for t in alert_boxes], ["", "", ""])
 
-                at.text_input(key="sb_watchlist").input("BTC-USD")
+                at.text_area(key="sb_watchlist").input("BTC-USD")
                 at.run()
 
             saved = json.loads(path.read_text(encoding="utf-8"))
@@ -187,7 +187,7 @@ class TestConcretumNoiseVwapStrategy(unittest.TestCase):
                 at = AppTest.from_file(app_path)
                 at.session_state["authenticated"] = True
                 at.run()
-                self.assertEqual(at.text_input(key="sb_watchlist").value, "ETH-USD")
+                self.assertEqual(at.text_area(key="sb_watchlist").value, "ETH-USD")
                 self.assertTrue(at.checkbox(key="sb_use_completed").value)
                 self.assertEqual(at.number_input(key="sb_equity").value, 250000.0)
             self.assertTrue(path.exists(), "cookie restore should rewrite the JSON file")
