@@ -2,18 +2,21 @@ name: Concretum Noise + VWAP 30m Signal Scanner
 
 on:
   workflow_dispatch:
+  repository_dispatch:
+    types: [scan]
   schedule:
-    # UTC. Offset from :00/:30 so GitHub is less likely to delay or drop the run.
-    # A push of this file is also what re-registers a stuck schedule.
-    - cron: '7,37 * * * *'
+    # Keep GitHub's clock as a backup. It has never created a run in this repo.
+    - cron: '12,42 * * * *'
+
+permissions:
+  contents: write
+  actions: write
 
 jobs:
   scan_concretum_signals:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     concurrency:
-      group: concretum-scanner
+      group: concretum-scan
       cancel-in-progress: false
     steps:
       - name: Checkout repository
@@ -48,3 +51,20 @@ jobs:
           git add state/last_alerts.json || true
           git diff --staged --quiet || git commit -m "chore: update 30m signal state"
           git push || true
+
+  # GitHub's schedule event has never fired here. After you click Run workflow once,
+  # this job waits ~28 minutes and starts the next run itself.
+  queue_next_scan:
+    needs: scan_concretum_signals
+    if: always()
+    runs-on: ubuntu-latest
+    concurrency:
+      group: concretum-chain
+      cancel-in-progress: true
+    steps:
+      - name: Wait 28 minutes then start the next scan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sleep 1680
+          gh workflow run concretum_scanner.yml --ref "${{ github.event.repository.default_branch }}"
