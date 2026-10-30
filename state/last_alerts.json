@@ -4,6 +4,6 @@
   "BITO": "FLAT_WAIT::INSIDE NOISE AREA (Equilibrium)",
   "NVDA": "FLAT_WAIT::INSIDE NOISE AREA (Equilibrium)",
   "TSLA": "FLAT_WAIT::INSIDE NOISE AREA (Equilibrium)",
-  "BTC-USD": "HOLD_LONG::INSIDE NOISE AREA (Equilibrium)",
-  "ETH-USD": "FLAT_WAIT::INSIDE NOISE AREA (Equilibrium)"
+  "BTC-USD": "FLAT_WAIT::INSIDE NOISE AREA (Equilibrium)",
+  "ETH-USD": "ENTER_SHORT (On 30m Close)::BEARISH IMBALANCE (<LB & <VWAP)"
 }
