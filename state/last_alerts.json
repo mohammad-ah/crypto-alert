@@ -1,5 +1,5 @@
 {
-  "SPY": "FLAT_WAIT::INSIDE NOISE AREA (Equilibrium)",
+  "SPY": "ENTER_SHORT (On 30m Close)::BEARISH IMBALANCE (<LB & <VWAP)",
   "QQQ": "FLAT_WAIT::INSIDE NOISE AREA (Equilibrium)",
   "BITO": "FLAT_WAIT::INSIDE NOISE AREA (Equilibrium)",
   "NVDA": "FLAT_WAIT::INSIDE NOISE AREA (Equilibrium)",
